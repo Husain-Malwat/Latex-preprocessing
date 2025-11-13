@@ -2,9 +2,7 @@
 
 ## 1. Objective
 
-This script automates the process of extracting and consolidating a large collection of LaTeX source files,  from arXiv. The primary goal is to transform a nested structure of compressed archives (`.tar.gz`, `.gz`) into a clean, flat directory of <mark style="background-color: yellow; color: red;">single, self-contained</mark>   `.tex` files.
-
-<!-- This is a <mark style="background-color: yellow; color: red;">single</mark> highlighted word. -->
+This script automates the process of extracting and consolidating a large collection of LaTeX source files,  from arXiv. The primary goal is to transform a nested structure of compressed archives (`.tar.gz`, `.gz`) into a clean, flat directory of single, self-contained `.tex` files.
 
 The pipeline performs a three-step process for each month's data:
 1.  **Primary Extraction**: Unpacks the main monthly archives (`2301.tar.gz`, `2302.tar.gz`, etc.).

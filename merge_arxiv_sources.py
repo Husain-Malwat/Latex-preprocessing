@@ -6,20 +6,14 @@ from pathlib import Path
 from tqdm import tqdm
 import shutil
 
-# --- REGULAR EXPRESSIONS FOR LATEX PARSING ---
-
-# Matches \input{...} or \include{...} commands, including commented out ones
-# Captures the filename inside the braces.
 RE_INCLUDE = re.compile(
     r"%*\s*\\(?:input|include)\s*\{?([\w\/\-\.]+)\}?"
 )
 
-# Matches \begin{document} to identify the main .tex file.
 RE_BEGIN_DOCUMENT = re.compile(
     r"\\begin\s*\{document\}", re.IGNORECASE
 )
 
-# Matches bibliography commands to replace with .bbl content.
 RE_BIBLIOGRAPHY = re.compile(
     r"\\bibliography\s*\{?([\w\/\-\.,]+)\}?"
 )
@@ -73,14 +67,12 @@ def extract_individual_papers(monthly_source_dir: Path, monthly_final_extract_di
         paper_output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Standard extraction using tar
             subprocess.run(
                 ["tar", "-xzf", str(gz_path), "-C", str(paper_output_dir)],
                 check=True, capture_output=True, text=True
             )
         except subprocess.CalledProcessError:
-            # Fallback for non-tar gzipped files (e.g., single .tex file)
-            shutil.rmtree(paper_output_dir) # Clean up failed tar attempt
+            shutil.rmtree(paper_output_dir)
             paper_output_dir.mkdir(parents=True, exist_ok=True)
             try:
                 temp_gz_path = temp_dir / gz_path.name
@@ -117,7 +109,6 @@ def find_root_tex_file(paper_dir: Path) -> Path | None:
     if not tex_files:
         return None
         
-    # Strategy 1: Check for a .bbl file and matching .tex
     bbl_files = list(paper_dir.glob('*.bbl'))
     if bbl_files:
         bbl_stem = bbl_files[0].stem
@@ -125,7 +116,6 @@ def find_root_tex_file(paper_dir: Path) -> Path | None:
         if matching_tex.exists():
             return matching_tex
 
-    # Strategy 2: Search for \begin{document}
     for tex_file in tex_files:
         try:
             content = tex_file.read_text(encoding='utf-8', errors='ignore')
@@ -134,7 +124,6 @@ def find_root_tex_file(paper_dir: Path) -> Path | None:
         except Exception:
             continue
     
-    # Fallback: if only one .tex file, assume it's the root
     if len(tex_files) == 1:
         return tex_files[0]
         
@@ -161,14 +150,13 @@ def merge_tex_files(root_file_path: Path, paper_dir: Path) -> str:
 
     def replace_include(match):
         included_filename = match.group(1)
-        # Ensure filename has .tex extension for searching
         if not included_filename.endswith('.tex'):
             included_filename += '.tex'
         
         file_to_include = paper_dir / included_filename
         if file_to_include.exists():
             return file_to_include.read_text(encoding='utf-8', errors='ignore')
-        return "" # If file not found, replace command with empty string
+        return "" 
 
     def replace_bibliography(match):
         bbl_files = list(paper_dir.glob('*.bbl'))
@@ -246,20 +234,17 @@ def process_monthly_archives(year: str, month: int, base_dir: Path):
     year_short = year[2:]
     folder_prefix = f"{year_short}{month_str}"
 
-    # --- Define Paths ---
     source_dir = base_dir / "target_src" / folder_prefix
     final_extract_dir = base_dir / "final_extracted" / folder_prefix
     final_merged_dir = base_dir / "final_merged" / folder_prefix
     temp_dir = base_dir / "temp_processing"
     log_dir = base_dir / "processing_logs"
     
-    # --- Create Directories ---
     final_extract_dir.mkdir(parents=True, exist_ok=True)
     final_merged_dir.mkdir(parents=True, exist_ok=True)
     temp_dir.mkdir(exist_ok=True)
     log_dir.mkdir(exist_ok=True)
 
-    # --- Initialize Logging ---
     processing_stats = {
         'year': year,
         'month': month_str,
@@ -268,25 +253,20 @@ def process_monthly_archives(year: str, month: int, base_dir: Path):
 
     print(f"\n===== PROCESSING {folder_prefix} =====")
     
-    # --- Step 2: Extract Individual Papers ---
     print("\n--- Starting Step 2: Individual Paper Extraction ---")
     extract_individual_papers(source_dir, final_extract_dir, temp_dir, processing_stats)
     print("--- Individual paper extraction complete. ---")
 
-    # --- Step 3: Merge TeX Files ---
     print("\n--- Starting Step 3: Merging TeX Files ---")
     merge_and_finalize_papers(final_extract_dir, final_merged_dir, processing_stats)
     print("--- TeX file merging complete. ---")
 
-    # --- Finalization ---
     processing_stats['status'] = 'completed'
     
-    # Save statistics to JSON file
     log_file_path = log_dir / f"stats_{folder_prefix}.json"
     with open(log_file_path, 'w') as f:
         json.dump(processing_stats, f, indent=4)
         
-    # Clean up temporary directory and extracted files to save space
     shutil.rmtree(temp_dir)
     shutil.rmtree(final_extract_dir)
     print(f"--- Cleaned up temporary and intermediate extracted files for {folder_prefix}. ---")
@@ -294,25 +274,18 @@ def process_monthly_archives(year: str, month: int, base_dir: Path):
 
 
 if __name__ == "__main__":
-    # --- CONFIGURATION ---
     YEAR = "2023"
     BASE_PROCESSING_DIR = Path(f"/mnt/NFS/patidarritesh/PDF_2_TEX/{YEAR}")
     
-    # --- SCRIPT EXECUTION ---
-    
-    # Step 1: Run this once for the entire year.
-    # It unpacks the main tarballs (e.g., 2301.tar.gz) into the target_src directory.
     initial_source_dir = BASE_PROCESSING_DIR / "src"
     initial_target_dir = BASE_PROCESSING_DIR / "target_src"
     extract_primary_archives(initial_source_dir, initial_target_dir)
 
-    # Step 2 & 3: Loop through each month to process the extracted contents.
     for month_num in range(1, 13):
         try:
             process_monthly_archives(YEAR, month_num, BASE_PROCESSING_DIR)
         except Exception as e:
             print(f"A critical error occurred while processing month {month_num}: {e}")
-            # Optionally log this to a main error file
             error_log_path = BASE_PROCESSING_DIR / "main_error_log.txt"
             with open(error_log_path, "a") as f:
                 f.write(f"Error in month {month_num}: {e}\n")

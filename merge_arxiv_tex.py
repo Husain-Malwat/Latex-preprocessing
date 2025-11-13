@@ -1,9 +1,3 @@
-# This script processes LaTeX files from an arXiv paper directory,
-# merging them into a single .tex file for easier compilation.
-
-
-
-
 import re
 from pathlib import Path
 import argparse
@@ -42,7 +36,7 @@ def find_root_tex_file(paper_dir: Path) -> Path | None:
 
     return None
 
-def merge_tex_files(root_file_path: Path, paper_dir: Path) -> str:
+def merge_tex_files(root_file_path: Path, paper_dir: Path, merge_bib: bool = True) -> str:
     try:
         content = root_file_path.read_text(encoding='utf-8', errors='ignore')
     except Exception as e:
@@ -65,14 +59,19 @@ def merge_tex_files(root_file_path: Path, paper_dir: Path) -> str:
         return ""
 
     merged = RE_INCLUDE.sub(replace_include, content)
-    merged = RE_BIBLIOGRAPHY.sub(replace_bibliography, merged)
+    
+    if merge_bib:
+        merged = RE_BIBLIOGRAPHY.sub(replace_bibliography, merged)
+    
     return merged
 
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description=" merge LaTeX files")
+    parser = argparse.ArgumentParser(description="merge LaTeX files")
     parser.add_argument("-i", "--input", required=True, help="Input latex folder")
     parser.add_argument("-o", "--output", required=True, help="Output merged .tex file")
+    parser.add_argument("--merge-bib", action="store_true", 
+                        help="If set, replaces \\bibliography commands with .bbl content")
     
     args = parser.parse_args()
 
@@ -83,9 +82,19 @@ if __name__ == "__main__":
     output_dir.mkdir(parents=True, exist_ok=True)
 
     root_tex = find_root_tex_file(paper_dir)
+    
+    print("Configuration:")
+    print(f" Input directory: {paper_dir}")
+    print(f" Output file: {output_file}")
+    print(f" Merge bibliography: {args.merge_bib}")
+    
     if not root_tex:
         print("No root .tex file found.")
     else:
-        merged_content = merge_tex_files(root_tex, paper_dir)
+        merged_content = merge_tex_files(root_tex, paper_dir, args.merge_bib)
         output_file.write_text(merged_content, encoding='utf-8')
         print(f"Merged .tex saved to {output_file}")
+        if args.merge_bib:
+            print("Bibliography content was merged from .bbl file")
+        else:
+            print("Bibliography commands were preserved")
