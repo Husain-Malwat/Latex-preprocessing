@@ -211,11 +211,11 @@ class LatexPreprocessor:
                         f.write(bib_data)
                     logger.info(f"Saved bibliography to {bib_output_path}")
             
-            if extract_document:
-                extracted = self.extract_document_content(data)
-                if extracted:
-                    data = extracted
-                    logger.debug(f"Extracted document content from {file_path}")
+            # if extract_document:
+            #     extracted = self.extract_document_content(data)
+            #     if extracted:
+            #         data = extracted
+            #         logger.debug(f"Extracted document content from {file_path}")
             
             if normalize_whitespace:
                 data = self.normalize_whitespace(data)
