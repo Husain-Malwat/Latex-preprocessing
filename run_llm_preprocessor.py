@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 from pathlib import Path
 from llm_preprocessor import LLMPreprocessor
 import logging
@@ -98,6 +99,12 @@ def main():
         help="Save stats after every N files (default: 5)"
     )
     parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="Number of concurrent files to process when input is a directory. If >1, uses async processing (default: 1)"
+    )
+    parser.add_argument(
         "--save-raw-responses",
         action="store_true",
         help="Save raw LLM responses to separate directory"
@@ -171,12 +178,23 @@ def main():
         logger.info(f"Backend: {args.backend}")
         logger.info(f"Model: {args.model}")
         
-        summary = preprocessor.preprocess_directory(
-            args.input,
-            args.output,
-            args.prompt_template,
-            save_interval=args.save_interval
-        )
+        if args.concurrency and args.concurrency > 1:
+            logger.info(f"Using async concurrent processing with concurrency={args.concurrency}")
+            summary = asyncio.run(
+                preprocessor.preprocess_directory_async(
+                    args.input,
+                    args.output,
+                    args.prompt_template,
+                    concurrency=args.concurrency
+                )
+            )
+        else:
+            summary = preprocessor.preprocess_directory(
+                args.input,
+                args.output,
+                args.prompt_template,
+                save_interval=args.save_interval
+            )
         
         # Print final summary
         logger.info("\n" + "="*60)
