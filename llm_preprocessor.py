@@ -4,9 +4,10 @@ import re
 import json
 import time
 import csv
+import random
 from pathlib import Path
 from functools import partial
-from typing import Optional, Dict, Any, Literal
+from typing import Optional, Dict, Any, Literal, List
 from datetime import datetime
 import logging
 from dataclasses import dataclass, asdict
@@ -39,6 +40,7 @@ class ProcessingResult:
     retry_count: int = 0
     model_name: str = "gemini-2.0-flash-exp"
     llm_backend: str = "gemini"  # gemini or vllm
+    server_endpoint: Optional[str] = None  # Track which server handled the request
 
 
 @dataclass
@@ -61,6 +63,7 @@ class PerformanceMetrics:
     timestamp: str
     backend: str
     model_name: str
+    num_servers: int = 1  # Track number of vLLM servers
 
 
 class LLMPreprocessor:
@@ -72,6 +75,8 @@ class LLMPreprocessor:
         llm_backend: Literal["gemini", "vllm"] = "gemini",
         api_key: Optional[str] = None,
         vllm_base_url: str = "http://localhost:8000/v1",
+        vllm_endpoints: Optional[List[str]] = None,  # NEW: Support multiple endpoints
+        load_balancing: Literal["random", "round-robin"] = "random",  # NEW: Load balancing strategy
         max_retries: int = 3,
         timeout: int = 300,
         max_tokens: int = 16384,
@@ -85,10 +90,12 @@ class LLMPreprocessor:
         Initialize the LLM preprocessor.
         
         Args:
-            model_name: Model to use for generation (e.g., "gemini-2.0-flash-exp" or "Qwen/Qwen3-14B-FP8")
+            model_name: Model to use for generation
             llm_backend: Which backend to use - "gemini" or "vllm"
-            api_key: Google AI API key (required for Gemini, not used for vLLM)
-            vllm_base_url: Base URL for vLLM server (default: http://localhost:8000/v1)
+            api_key: Google AI API key (required for Gemini)
+            vllm_base_url: Base URL for single vLLM server (deprecated, use vllm_endpoints)
+            vllm_endpoints: List of vLLM server endpoints for multi-GPU setup
+            load_balancing: Strategy for distributing requests: "random" or "round-robin"
             max_retries: Maximum number of retry attempts
             timeout: Timeout in seconds for each API call
             max_tokens: Maximum tokens to generate
@@ -108,6 +115,8 @@ class LLMPreprocessor:
         self.csv_stats_file = csv_stats_file
         self.save_raw_responses = save_raw_responses
         self.raw_responses_dir = Path(raw_responses_dir)
+        self.load_balancing = load_balancing
+        self.round_robin_index = 0  # For round-robin load balancing
         
         # Create raw responses directory if needed
         if self.save_raw_responses:
@@ -120,39 +129,79 @@ class LLMPreprocessor:
                 raise ValueError("api_key is required for Gemini backend")
             genai.configure(api_key=api_key)
             self.model = genai.GenerativeModel(self.model_name)
-            self.vllm_client = None
+            self.vllm_clients = []
+            self.vllm_endpoints = []
             logger.info(f"Initialized Gemini backend with model: {model_name}")
             
         elif self.llm_backend == "vllm":
             self.model = None
-            self.vllm_client = OpenAI(
-                base_url=vllm_base_url,
-                api_key="EMPTY"  # vLLM doesn't require API key
-            )
-            logger.info(f"Initialized vLLM backend at {vllm_base_url} with model: {model_name}")
             
-            # Test connection
-            try:
-                models = self.vllm_client.models.list()
-                logger.info(f"✓ Connected to vLLM server. Available models: {[m.id for m in models.data]}")
-            except Exception as e:
-                logger.warning(f"Could not connect to vLLM server: {e}")
+            # Setup multi-GPU endpoints
+            if vllm_endpoints:
+                self.vllm_endpoints = vllm_endpoints
+            else:
+                # Fallback to single endpoint for backward compatibility
+                self.vllm_endpoints = [vllm_base_url]
+            
+            # Create a client for each endpoint
+            self.vllm_clients = []
+            for endpoint in self.vllm_endpoints:
+                client = OpenAI(
+                    base_url=endpoint,
+                    api_key="EMPTY"  # vLLM doesn't require API key
+                )
+                self.vllm_clients.append(client)
+            
+            logger.info(f"Initialized vLLM backend with {len(self.vllm_endpoints)} server(s)")
+            logger.info(f"Load balancing strategy: {load_balancing}")
+            for idx, endpoint in enumerate(self.vllm_endpoints):
+                logger.info(f"  Server {idx}: {endpoint}")
+            
+            # Test connections
+            for idx, (client, endpoint) in enumerate(zip(self.vllm_clients, self.vllm_endpoints)):
+                try:
+                    models = client.models.list()
+                    logger.info(f"✓ Server {idx} ({endpoint}): Connected. Available models: {[m.id for m in models.data]}")
+                except Exception as e:
+                    logger.warning(f"✗ Server {idx} ({endpoint}): Connection failed - {e}")
         else:
             raise ValueError(f"Invalid llm_backend: {llm_backend}. Must be 'gemini' or 'vllm'")
         
         # Initialize CSV file with headers if it doesn't exist
         self._initialize_csv()
     
+    def _get_vllm_client(self) -> tuple[OpenAI, str]:
+        """
+        Get a vLLM client using the configured load balancing strategy.
+        
+        Returns:
+            Tuple of (client, endpoint_url)
+        """
+        if not self.vllm_clients:
+            raise RuntimeError("No vLLM clients initialized")
+        
+        if len(self.vllm_clients) == 1:
+            return self.vllm_clients[0], self.vllm_endpoints[0]
+        
+        if self.load_balancing == "random":
+            idx = random.randint(0, len(self.vllm_clients) - 1)
+        else:  # round-robin
+            idx = self.round_robin_index % len(self.vllm_clients)
+            self.round_robin_index += 1
+        
+        return self.vllm_clients[idx], self.vllm_endpoints[idx]
+    
     def _initialize_csv(self):
         """Initialize CSV file with headers if it doesn't exist."""
         if not os.path.exists(self.csv_stats_file):
             with open(self.csv_stats_file, 'w', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=[
-                    'file_id', 'timestamp', 'status', 'input_tokens',
-                    'output_tokens', 'processing_time', 'error_message',
-                    'retry_count', 'model_name', 'llm_backend'
+                    'file_id', 'timestamp', 'status', 'input_tokens', 'output_tokens',
+                    'processing_time', 'error_message', 'retry_count', 'model_name', 
+                    'llm_backend', 'server_endpoint'
                 ])
                 writer.writeheader()
+            logger.info(f"Initialized CSV stats file: {self.csv_stats_file}")
     
     def _save_stats(self, result: ProcessingResult):
         """Save processing statistics to both JSONL and CSV files."""
@@ -164,9 +213,9 @@ class LLMPreprocessor:
         # Save to CSV
         with open(self.csv_stats_file, 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=[
-                'file_id', 'timestamp', 'status', 'input_tokens',
-                'output_tokens', 'processing_time', 'error_message',
-                'retry_count', 'model_name', 'llm_backend'
+                'file_id', 'timestamp', 'status', 'input_tokens', 'output_tokens',
+                'processing_time', 'error_message', 'retry_count', 'model_name', 
+                'llm_backend', 'server_endpoint'
             ])
             writer.writerow(asdict(result))
         
@@ -213,8 +262,11 @@ class LLMPreprocessor:
             {"role": "user", "content": prompt}
         ]
         
+        # Get vLLM client
+        client, endpoint = self._get_vllm_client()
+        
         # Call the API
-        response = self.vllm_client.chat.completions.create(
+        response = client.chat.completions.create(
             model=self.model_name,
             messages=messages,
             temperature=self.temperature,
@@ -229,7 +281,7 @@ class LLMPreprocessor:
         input_tokens = response.usage.prompt_tokens if hasattr(response, 'usage') else 0
         output_tokens = response.usage.completion_tokens if hasattr(response, 'usage') else 0
 
-        logger.info(f"vLLM call successful for {file_id}. Tokens - Input: {input_tokens}, Output: {output_tokens}")
+        logger.info(f"vLLM call successful for {file_id} (via {endpoint}). Tokens - Input: {input_tokens}, Output: {output_tokens}")
         
         return generated_text, input_tokens, output_tokens
     

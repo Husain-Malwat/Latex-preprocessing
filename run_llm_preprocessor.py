@@ -45,7 +45,18 @@ def main():
     parser.add_argument(
         "--vllm-url",
         default="http://localhost:8000/v1",
-        help="Base URL for vLLM server (default: http://localhost:8000/v1)"
+        help="Base URL for single vLLM server (default: http://localhost:8000/v1). Use --vllm-endpoints for multi-GPU setup"
+    )
+    parser.add_argument(
+        "--vllm-endpoints",
+        nargs='+',
+        help="List of vLLM server endpoints for multi-GPU setup (e.g., --vllm-endpoints http://localhost:8000/v1 http://localhost:8001/v1)"
+    )
+    parser.add_argument(
+        "--load-balancing",
+        choices=["random", "round-robin"],
+        default="random",
+        help="Load balancing strategy for multi-GPU setup: 'random' or 'round-robin' (default: random)"
     )
     
     # Model configuration
@@ -132,13 +143,29 @@ def main():
         logger.error("--api-key is required when using Gemini backend")
         return 1
     
+    # Determine vLLM endpoints
+    vllm_endpoints = None
+    vllm_base_url = args.vllm_url
+    
+    if args.backend == "vllm":
+        if args.vllm_endpoints:
+            vllm_endpoints = args.vllm_endpoints
+            logger.info(f"Multi-GPU setup detected with {len(vllm_endpoints)} endpoints:")
+            for idx, endpoint in enumerate(vllm_endpoints):
+                logger.info(f"  Server {idx}: {endpoint}")
+            logger.info(f"Load balancing: {args.load_balancing}")
+        else:
+            logger.info(f"Single GPU setup: {vllm_base_url}")
+    
     # Initialize preprocessor
     try:
         preprocessor = LLMPreprocessor(
             model_name=args.model,
             llm_backend=args.backend,
             api_key=args.api_key if args.backend == "gemini" else None,
-            vllm_base_url=args.vllm_url,
+            vllm_base_url=vllm_base_url,
+            vllm_endpoints=vllm_endpoints,
+            load_balancing=args.load_balancing,
             max_retries=args.max_retries,
             timeout=args.timeout,
             max_tokens=args.max_tokens,
@@ -165,6 +192,8 @@ def main():
             logger.info(f"✓ File processed successfully")
             logger.info(f"  Backend: {result.llm_backend}")
             logger.info(f"  Model: {result.model_name}")
+            if result.server_endpoint:
+                logger.info(f"  Server: {result.server_endpoint}")
             logger.info(f"  Processing time: {result.processing_time:.2f}s")
             logger.info(f"  Input tokens: {result.input_tokens}")
             logger.info(f"  Output tokens: {result.output_tokens}")
@@ -202,6 +231,9 @@ def main():
         logger.info("="*60)
         logger.info(f"Backend: {args.backend}")
         logger.info(f"Model: {args.model}")
+        if vllm_endpoints:
+            logger.info(f"Multi-GPU: {len(vllm_endpoints)} servers")
+            logger.info(f"Load balancing: {args.load_balancing}")
         logger.info(f"Total files: {summary['total']}")
         logger.info(f"✓ Success: {summary['success']}")
         logger.info(f"⚠ Partial: {summary['partial']}")
