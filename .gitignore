@@ -55,3 +55,6 @@ Thumbs.db
 *.tmp
 .cache/
 temp/
+concurrency_benchmark/
+logs_server/
+logs/

@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import csv
 from pathlib import Path
 from llm_preprocessor import LLMPreprocessor
 import logging
@@ -14,19 +15,32 @@ def main():
     
     # Required arguments
     parser.add_argument(
-        "input",
-        type=Path,
-        help="Input file or directory containing .tex files"
-    )
-    parser.add_argument(
         "output",
         type=Path,
-        help="Output file or directory for processed files"
+        help="Output directory for processed files"
     )
     parser.add_argument(
         "prompt_template",
         type=Path,
         help="Path to prompt template file (.md or .txt)"
+    )
+    
+    # Input source (one of these must be provided)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
+        "--input-dir",
+        type=Path,
+        help="Input directory containing .tex files"
+    )
+    input_group.add_argument(
+        "--input-file",
+        type=Path,
+        help="Single input .tex file to process"
+    )
+    input_group.add_argument(
+        "--file-list-csv",
+        type=Path,
+        help="CSV file containing list of .tex files to process (columns: path/file/input)"
     )
     
     # Backend selection
@@ -113,7 +127,7 @@ def main():
         "--concurrency",
         type=int,
         default=1,
-        help="Number of concurrent files to process when input is a directory. If >1, uses async processing (default: 1)"
+        help="Number of concurrent files to process. If >1, uses async processing (default: 1)"
     )
     parser.add_argument(
         "--save-raw-responses",
@@ -130,10 +144,6 @@ def main():
     args = parser.parse_args()
     
     # Validate inputs
-    if not args.input.exists():
-        logger.error(f"Input path does not exist: {args.input}")
-        return 1
-    
     if not args.prompt_template.exists():
         logger.error(f"Prompt template does not exist: {args.prompt_template}")
         return 1
@@ -179,11 +189,62 @@ def main():
         logger.error(f"Failed to initialize preprocessor: {e}")
         return 1
     
-    # Process single file or directory
-    if args.input.is_file():
-        logger.info(f"Processing single file: {args.input}")
+    # Determine processing mode
+    if args.file_list_csv:
+        # Process files from CSV list
+        if not args.file_list_csv.exists():
+            logger.error(f"CSV file does not exist: {args.file_list_csv}")
+            return 1
+        
+        logger.info(f"Processing files from CSV list: {args.file_list_csv}")
+        logger.info(f"Backend: {args.backend}")
+        logger.info(f"Model: {args.model}")
+        
+        if args.concurrency and args.concurrency > 1:
+            logger.info(f"Using async concurrent processing with concurrency={args.concurrency}")
+            summary = asyncio.run(
+                preprocessor.preprocess_from_csv_async(
+                    args.file_list_csv,
+                    args.output,
+                    args.prompt_template,
+                    concurrency=args.concurrency
+                )
+            )
+        else:
+            summary = preprocessor.preprocess_from_csv(
+                args.file_list_csv,
+                args.output,
+                args.prompt_template,
+                save_interval=args.save_interval
+            )
+        
+        # Print final summary
+        logger.info("\n" + "="*60)
+        logger.info("FINAL SUMMARY")
+        logger.info("="*60)
+        logger.info(f"Backend: {args.backend}")
+        logger.info(f"Model: {args.model}")
+        if vllm_endpoints:
+            logger.info(f"Multi-GPU: {len(vllm_endpoints)} servers")
+            logger.info(f"Load balancing: {args.load_balancing}")
+        logger.info(f"Total files: {summary['total']}")
+        logger.info(f"✓ Success: {summary['success']}")
+        logger.info(f"⚠ Partial: {summary['partial']}")
+        logger.info(f"✗ Failed: {summary['failed']}")
+        logger.info(f"Statistics saved to: {args.stats_file} and {args.csv_stats_file}")
+        logger.info("="*60)
+        
+        return 0 if summary["failed"] == 0 else 1
+    
+    elif args.input_file:
+        # Process single file
+        if not args.input_file.exists():
+            logger.error(f"Input file does not exist: {args.input_file}")
+            return 1
+        
+        logger.info(f"Processing single file: {args.input_file}")
         result = preprocessor.preprocess_file(
-            args.input,
+            args.input_file,
             args.output,
             args.prompt_template
         )
@@ -202,8 +263,13 @@ def main():
             logger.error(f"✗ File processing failed: {result.error_message}")
             return 1
     
-    elif args.input.is_dir():
-        logger.info(f"Processing directory: {args.input}")
+    elif args.input_dir:
+        # Process directory
+        if not args.input_dir.exists():
+            logger.error(f"Input directory does not exist: {args.input_dir}")
+            return 1
+        
+        logger.info(f"Processing directory: {args.input_dir}")
         logger.info(f"Backend: {args.backend}")
         logger.info(f"Model: {args.model}")
         
@@ -211,7 +277,7 @@ def main():
             logger.info(f"Using async concurrent processing with concurrency={args.concurrency}")
             summary = asyncio.run(
                 preprocessor.preprocess_directory_async(
-                    args.input,
+                    args.input_dir,
                     args.output,
                     args.prompt_template,
                     concurrency=args.concurrency
@@ -219,7 +285,7 @@ def main():
             )
         else:
             summary = preprocessor.preprocess_directory(
-                args.input,
+                args.input_dir,
                 args.output,
                 args.prompt_template,
                 save_interval=args.save_interval
@@ -244,7 +310,7 @@ def main():
         return 0 if summary["failed"] == 0 else 1
     
     else:
-        logger.error(f"Invalid input path: {args.input}")
+        logger.error("No input source specified. Use --input-dir, --input-file, or --file-list-csv")
         return 1
 
 

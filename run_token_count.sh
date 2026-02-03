@@ -5,12 +5,12 @@
 # ==========================================================
 
 # ===== USER CONFIGURATION =====
-BASE_DIR="/home/husainmalwat/workspace/OCR_Latex/data/final_merged"
+BASE_DIR="/home/husainmalwat/workspace/OCR_Latex/data/preprocess_1"
 SCRIPT_PATH="/home/husainmalwat/workspace/OCR_Latex/experiments/7_NORMALIZATION_WITH_STY/Latex-preprocessing/count_tokens.py"
 MODEL_NAME="Qwen/Qwen2.5-Coder-7B-Instruct"
-LOG_DIR="./token_count_logs"
-MAX_JOBS=32          # parallel processes
-OUTPUT_DIR="./token_count_outputs"
+LOG_DIR="./logs/token_count_logs_preprocess_1"
+MAX_JOBS=16          # parallel processes
+OUTPUT_DIR="./token_count/token_count_logs_preprocess_1"
 # ==========================================================
 
 mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
@@ -20,7 +20,7 @@ echo "📁 Collecting all month-level directories..."
 dirs=()
 
 for year in $(seq 2000 2022); do
-  for month_dir in "$BASE_DIR/$year/final_merged/"*/; do
+  for month_dir in "$BASE_DIR/$year/"*/; do
     if [ -d "$month_dir" ]; then
       dirs+=("$month_dir")
     fi
@@ -28,7 +28,7 @@ for year in $(seq 2000 2022); do
 done
 
 # Year 2023 — only available months
-for month_dir in "$BASE_DIR/2023/final_merged/"*/; do
+for month_dir in "$BASE_DIR/2023/"*/; do
   if [ -d "$month_dir" ]; then
     dirs+=("$month_dir")
   fi

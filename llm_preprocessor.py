@@ -765,13 +765,6 @@ Your response MUST contain only the final, preprocessed LaTeX code, enclosed in 
         
         total_tokens = total_input_tokens + total_output_tokens
         
-        # Calculate TPS metrics
-        input_tps = total_input_tokens / total_time if total_time > 0 else 0
-        output_tps = total_output_tokens / total_time if total_time > 0 else 0
-        total_tps = total_tokens / total_time if total_time > 0 else 0
-        avg_time_per_file = total_time / len(results) if len(results) > 0 else 0
-        files_per_second = len(results) / total_time if total_time > 0 else 0
-        
         # Create performance metrics
         perf_metrics = PerformanceMetrics(
             total_files=len(results),
@@ -780,17 +773,18 @@ Your response MUST contain only the final, preprocessed LaTeX code, enclosed in 
             total_input_tokens=total_input_tokens,
             total_output_tokens=total_output_tokens,
             total_tokens=total_tokens,
-            input_tps=input_tps,
-            output_tps=output_tps,
-            total_tps=total_tps,
-            avg_time_per_file=avg_time_per_file,
-            files_per_second=files_per_second,
+            input_tps=total_input_tokens / total_time if total_time > 0 else 0,
+            output_tps=total_output_tokens / total_time if total_time > 0 else 0,
+            total_tps=total_tokens / total_time if total_time > 0 else 0,
+            avg_time_per_file=total_time / len(results) if len(results) > 0 else 0,
+            files_per_second=len(results) / total_time if total_time > 0 else 0,
             success_count=summary["success"],
             failed_count=summary["failed"],
             partial_count=summary["partial"],
             timestamp=datetime.now().isoformat(),
             backend=self.llm_backend,
-            model_name=self.model_name
+            model_name=self.model_name,
+            num_servers=len(self.vllm_endpoints) if self.llm_backend == "vllm" else 1
         )
         
         # Save performance metrics
@@ -807,19 +801,19 @@ Your response MUST contain only the final, preprocessed LaTeX code, enclosed in 
         logger.info(f"Already normalized: {len(normalized_files)}")
         logger.info(f"Newly processed: {len(results)}")
         logger.info(f"Total Time: {total_time:.2f}s")
-        logger.info(f"Avg Time/File: {avg_time_per_file:.2f}s")
-        logger.info(f"Files/Second: {files_per_second:.2f}")
+        logger.info(f"Avg Time/File: {total_time / len(results) if len(results) > 0 else 0:.2f}s")
+        logger.info(f"Files/Second: {len(results) / total_time if total_time > 0 else 0:.2f}")
         logger.info(f"")
         logger.info(f"Total Input Tokens: {total_input_tokens:,}")
         logger.info(f"Total Output Tokens: {total_output_tokens:,}")
         logger.info(f"Total Tokens: {total_tokens:,}")
         logger.info(f"")
-        logger.info(f"Input TPS: {input_tps:.2f} tokens/sec")
-        logger.info(f"Output TPS: {output_tps:.2f} tokens/sec")
-        logger.info(f"Total TPS: {total_tps:.2f} tokens/sec")
+        logger.info(f"Input TPS: {total_input_tokens / total_time if total_time > 0 else 0:.2f} tokens/sec")
+        logger.info(f"Output TPS: {total_output_tokens / total_time if total_time > 0 else 0:.2f} tokens/sec")
+        logger.info(f"Total TPS: {total_tokens / total_time if total_time > 0 else 0:.2f} tokens/sec")
         logger.info(f"")
         logger.info(f"✅ Success: {summary['success']}")
-        logger.info(f"⚠️  Partial: {summary['partial']}")
+        logger.info(f"⚠️ Partial: {summary['partial']}")
         logger.info(f"❌ Failed: {summary['failed']}")
         logger.info(f"{'='*80}\n")
         
@@ -828,6 +822,346 @@ Your response MUST contain only the final, preprocessed LaTeX code, enclosed in 
         summary['already_processed'] = len(normalized_files)
         summary['newly_processed'] = len(results)
         summary['total_in_input_dir'] = len(all_tex_files)
+        
+        return summary
+
+    def _read_file_paths_from_csv(self, csv_path: Path) -> List[Path]:
+        """
+        Read file paths from CSV file.
+        
+        Args:
+            csv_path: Path to CSV file
+            
+        Returns:
+            List of Path objects
+        """
+        paths = []
+        
+        try:
+            with open(csv_path, 'r') as f:
+                reader = csv.DictReader(f)
+                
+                # Find the column with paths
+                fieldnames = reader.fieldnames
+                path_column = None
+                
+                for possible_name in ['path', 'file', 'input', 'input_file', 'filepath', 'file_path']:
+                    if possible_name in fieldnames:
+                        path_column = possible_name
+                        break
+                
+                if not path_column:
+                    # Use first column as fallback
+                    path_column = fieldnames[0]
+                    logger.info(f"No standard path column found. Using first column: '{path_column}'")
+                else:
+                    logger.info(f"Using column '{path_column}' for file paths")
+                
+                for row in reader:
+                    path_str = row[path_column].strip()
+                    if path_str:
+                        paths.append(path_str)
+            
+            # Convert to Path objects and validate
+            path_objects = []
+            invalid_count = 0
+            
+            for p in paths:
+                path_obj = Path(p)
+                if not path_obj.exists():
+                    logger.warning(f"File does not exist: {path_obj}")
+                    invalid_count += 1
+                elif path_obj.suffix != '.tex':
+                    logger.warning(f"Not a .tex file: {path_obj}")
+                    invalid_count += 1
+                else:
+                    path_objects.append(path_obj)
+            
+            logger.info(f"Loaded {len(path_objects)} valid file paths from {csv_path}")
+            if invalid_count > 0:
+                logger.warning(f"Skipped {invalid_count} invalid/missing files")
+            
+            return path_objects
+            
+        except Exception as e:
+            logger.error(f"Failed to read file list from {csv_path}: {e}")
+            raise
+
+    def preprocess_from_csv(
+        self,
+        csv_path: Path,
+        output_dir: Path,
+        prompt_template_path: Path,
+        save_interval: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Preprocess LaTeX files listed in a CSV file (sequential processing).
+        
+        Args:
+            csv_path: Path to CSV file containing file paths
+            output_dir: Directory to save processed files
+            prompt_template_path: Path to prompt template
+            save_interval: Save stats after every N files
+            
+        Returns:
+            Dictionary with summary statistics
+        """
+        logger.info(f"Reading file paths from CSV: {csv_path}")
+        file_list = self._read_file_paths_from_csv(csv_path)
+        
+        if not file_list:
+            logger.error(f"No valid .tex files found in {csv_path}")
+            return {"total": 0, "success": 0, "failed": 0, "partial": 0}
+        
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Filter out already processed files
+        normalized_files = sorted(list(output_dir.glob("*.tex")))
+        normalized_stems = {f.stem for f in normalized_files}
+        tex_files = [f for f in file_list if f.stem not in normalized_stems]
+        
+        # Detailed logging
+        logger.info(f"\n{'='*80}")
+        logger.info("📁 FILE PROCESSING STATUS")
+        logger.info(f"{'='*80}")
+        logger.info(f"Total files in CSV: {len(file_list)}")
+        logger.info(f"Already normalized files: {len(normalized_files)}")
+        logger.info(f"Files yet to process: {len(tex_files)}")
+        logger.info(f"{'='*80}\n")
+        
+        if normalized_files:
+            logger.info(f"✓ Previously normalized files ({len(normalized_files)}):")
+            for nf in normalized_files[:10]:
+                logger.info(f"  - {nf.name}")
+            if len(normalized_files) > 10:
+                logger.info(f"  ... and {len(normalized_files) - 10} more")
+            logger.info("")
+        
+        if not tex_files:
+            logger.info("✅ All files have already been normalized!")
+            return {
+                "total": len(file_list),
+                "success": len(normalized_files),
+                "failed": 0,
+                "partial": 0,
+                "already_processed": len(normalized_files),
+                "newly_processed": 0
+            }
+        
+        logger.info(f"🔄 Files to process in this run ({len(tex_files)}):")
+        for tf in tex_files[:10]:
+            logger.info(f"  - {tf}")
+        if len(tex_files) > 10:
+            logger.info(f"  ... and {len(tex_files) - 10} more")
+        logger.info("")
+        
+        # Start timing
+        start_time = time.time()
+        
+        summary = {"total": len(tex_files), "success": 0, "failed": 0, "partial": 0}
+        total_input_tokens = 0
+        total_output_tokens = 0
+        
+        for idx, tex_file in enumerate(tex_files, 1):
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Processing {idx}/{len(tex_files)}: {tex_file}")
+            logger.info(f"{'='*60}")
+            
+            output_path = output_dir / tex_file.name
+            result = self.preprocess_file(tex_file, output_path, prompt_template_path)
+            
+            summary[result.status] += 1
+            total_input_tokens += result.input_tokens
+            total_output_tokens += result.output_tokens
+            
+            logger.info(f"Progress: {idx}/{len(tex_files)} | Success: {summary['success']} | Failed: {summary['failed']} | Partial: {summary['partial']}")
+            
+            # Add delay between requests
+            if idx < len(tex_files):
+                time.sleep(2)
+        
+        # Calculate metrics
+        total_time = time.time() - start_time
+        total_tokens = total_input_tokens + total_output_tokens
+        
+        input_tps = total_input_tokens / total_time if total_time > 0 else 0
+        output_tps = total_output_tokens / total_time if total_time > 0 else 0
+        total_tps = total_tokens / total_time if total_time > 0 else 0
+        avg_time_per_file = total_time / len(tex_files) if len(tex_files) > 0 else 0
+        files_per_second = len(tex_files) / total_time if total_time > 0 else 0
+        
+        perf_metrics = PerformanceMetrics(
+            total_files=len(tex_files),
+            concurrency=1,
+            total_time=total_time,
+            total_input_tokens=total_input_tokens,
+            total_output_tokens=total_output_tokens,
+            total_tokens=total_tokens,
+            input_tps=input_tps,
+            output_tps=output_tps,
+            total_tps=total_tps,
+            avg_time_per_file=avg_time_per_file,
+            files_per_second=files_per_second,
+            success_count=summary["success"],
+            failed_count=summary["failed"],
+            partial_count=summary["partial"],
+            timestamp=datetime.now().isoformat(),
+            backend=self.llm_backend,
+            model_name=self.model_name,
+            num_servers=len(self.vllm_endpoints) if self.llm_backend == "vllm" else 1
+        )
+        
+        self._save_performance_metrics(perf_metrics)
+        
+        logger.info(f"\n{'='*80}")
+        logger.info("📊 PROCESSING COMPLETE - PERFORMANCE METRICS")
+        logger.info(f"{'='*80}")
+        logger.info(f"Backend: {self.llm_backend}")
+        logger.info(f"Model: {self.model_name}")
+        logger.info(f"Total files in CSV: {len(file_list)}")
+        logger.info(f"Already normalized: {len(normalized_files)}")
+        logger.info(f"Newly processed: {len(tex_files)}")
+        logger.info(f"Total Time: {total_time:.2f}s")
+        logger.info(f"Avg Time/File: {total_time / len(tex_files) if len(tex_files) > 0 else 0:.2f}s")
+        logger.info(f"")
+        logger.info(f"Total TPS: {total_tps:.2f} tokens/sec")
+        logger.info(f"Input TPS: {input_tps:.2f} tokens/sec")
+        logger.info(f"Output TPS: {output_tps:.2f} tokens/sec")
+        logger.info(f"")
+        logger.info(f"✓ Success: {summary['success']}")
+        logger.info(f"⚠ Partial: {summary['partial']}")
+        logger.info(f"✗ Failed: {summary['failed']}")
+        logger.info(f"{'='*80}\n")
+        
+        summary['performance'] = asdict(perf_metrics)
+        summary['already_processed'] = len(normalized_files)
+        summary['newly_processed'] = len(tex_files)
+        
+        return summary
+
+    async def preprocess_from_csv_async(
+        self,
+        csv_path: Path,
+        output_dir: Path,
+        prompt_template_path: Path,
+        concurrency: int = 4
+    ) -> Dict[str, Any]:
+        """
+        Concurrently preprocess LaTeX files listed in a CSV file.
+        
+        Args:
+            csv_path: Path to CSV file containing file paths
+            output_dir: Directory to save processed files
+            prompt_template_path: Path to prompt template
+            concurrency: Number of concurrent requests
+            
+        Returns:
+            Summary dictionary with performance metrics
+        """
+        logger.info(f"Reading file paths from CSV: {csv_path}")
+        file_list = self._read_file_paths_from_csv(csv_path)
+        
+        if not file_list:
+            logger.error(f"No valid .tex files found in {csv_path}")
+            return {"total": 0, "success": 0, "failed": 0, "partial": 0}
+        
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Filter out already processed files
+        normalized_files = sorted(list(output_dir.glob("*.tex")))
+        normalized_stems = {f.stem for f in normalized_files}
+        tex_files = [f for f in file_list if f.stem not in normalized_stems]
+        
+        # Detailed logging
+        logger.info(f"\n{'='*80}")
+        logger.info("📁 FILE PROCESSING STATUS")
+        logger.info(f"{'='*80}")
+        logger.info(f"Total files in CSV: {len(file_list)}")
+        logger.info(f"Already normalized files: {len(normalized_files)}")
+        logger.info(f"Files yet to process: {len(tex_files)}")
+        logger.info(f"{'='*80}\n")
+        
+        if not tex_files:
+            logger.info("✅ All files have already been normalized!")
+            return {
+                "total": len(file_list),
+                "success": len(normalized_files),
+                "failed": 0,
+                "partial": 0,
+                "already_processed": len(normalized_files),
+                "newly_processed": 0
+            }
+        
+        logger.info(f"🚀 Starting async preprocessing of {len(tex_files)} files with concurrency={concurrency}")
+        
+        start_time = time.time()
+        semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+        
+        tasks = []
+        for tex_file in tex_files:
+            output_path = output_dir / tex_file.name
+            tasks.append(self._process_file_async(semaphore, tex_file, output_path, prompt_template_path))
+        
+        results = await asyncio.gather(*tasks)
+        total_time = time.time() - start_time
+        
+        # Calculate metrics
+        summary = {"total": len(results), "success": 0, "failed": 0, "partial": 0}
+        total_input_tokens = 0
+        total_output_tokens = 0
+        
+        for r in results:
+            status = getattr(r, "status", "failed")
+            if status in summary:
+                summary[status] += 1
+            else:
+                summary["failed"] += 1
+            
+            total_input_tokens += getattr(r, "input_tokens", 0)
+            total_output_tokens += getattr(r, "output_tokens", 0)
+        
+        total_tokens = total_input_tokens + total_output_tokens
+        
+        perf_metrics = PerformanceMetrics(
+            total_files=len(results),
+            concurrency=concurrency,
+            total_time=total_time,
+            total_input_tokens=total_input_tokens,
+            total_output_tokens=total_output_tokens,
+            total_tokens=total_tokens,
+            input_tps=total_input_tokens / total_time if total_time > 0 else 0,
+            output_tps=total_output_tokens / total_time if total_time > 0 else 0,
+            total_tps=total_tokens / total_time if total_time > 0 else 0,
+            avg_time_per_file=total_time / len(results) if len(results) > 0 else 0,
+            files_per_second=len(results) / total_time if total_time > 0 else 0,
+            success_count=summary["success"],
+            failed_count=summary["failed"],
+            partial_count=summary["partial"],
+            timestamp=datetime.now().isoformat(),
+            backend=self.llm_backend,
+            model_name=self.model_name,
+            num_servers=len(self.vllm_endpoints) if self.llm_backend == "vllm" else 1
+        )
+        
+        self._save_performance_metrics(perf_metrics)
+        
+        logger.info(f"\n{'='*80}")
+        logger.info("📊 PERFORMANCE METRICS")
+        logger.info(f"{'='*80}")
+        logger.info(f"Backend: {self.llm_backend}")
+        logger.info(f"Model: {self.model_name}")
+        logger.info(f"Concurrency: {concurrency}")
+        logger.info(f"Total files in CSV: {len(file_list)}")
+        logger.info(f"Already normalized: {len(normalized_files)}")
+        logger.info(f"Newly processed: {len(results)}")
+        logger.info(f"Total Time: {total_time:.2f}s")
+        logger.info(f"Total TPS: {total_tokens / total_time if total_time > 0 else 0:.2f} tokens/sec")
+        logger.info(f"✅ Success: {summary['success']} | ⚠️ Partial: {summary['partial']} | ❌ Failed: {summary['failed']}")
+        logger.info(f"{'='*80}\n")
+        
+        summary['performance'] = asdict(perf_metrics)
+        summary['already_processed'] = len(normalized_files)
+        summary['newly_processed'] = len(results)
         
         return summary
 
