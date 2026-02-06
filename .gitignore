@@ -21,6 +21,7 @@ wheels/
 *.egg
 *.csv
 *.jsonl
+*.pid
 
 # Virtual Environment
 venv/
